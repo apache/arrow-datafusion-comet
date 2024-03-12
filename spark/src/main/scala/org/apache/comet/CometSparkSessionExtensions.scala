@@ -42,7 +42,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
 import org.apache.comet.CometConf._
-import org.apache.comet.CometSparkSessionExtensions.{isANSIEnabled, isCometBroadCastEnabled, isCometColumnarShuffleEnabled, isCometEnabled, isCometExecEnabled, isCometOperatorEnabled, isCometScan, isCometScanEnabled, isCometShuffleEnabled, isSchemaSupported}
+import org.apache.comet.CometSparkSessionExtensions.{applyRowToColumnar, isANSIEnabled, isCometBroadCastEnabled, isCometColumnarShuffleEnabled, isCometEnabled, isCometExecEnabled, isCometOperatorEnabled, isCometScan, isCometScanEnabled, isCometShuffleEnabled, isSchemaSupported}
 import org.apache.comet.parquet.{CometParquetScan, SupportsComet}
 import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.QueryPlanSerde
@@ -239,6 +239,11 @@ class CometSparkSessionExtensions
         case op if isCometScan(op) =>
           val nativeOp = QueryPlanSerde.operator2Proto(op).get
           CometScanWrapper(nativeOp, op)
+
+        case leaf: LeafExecNode if applyRowToColumnar(leaf) =>
+          val cometOp = CometRowToColumnarExec(leaf)
+          val nativeOp = QueryPlanSerde.operator2Proto(cometOp).get
+          CometSinkPlaceHolder(nativeOp, leaf, cometOp)
 
         case op: ProjectExec =>
           val newOp = transform1(op)
@@ -624,6 +629,10 @@ object CometSparkSessionExtensions extends Logging {
 
   def isCometScan(op: SparkPlan): Boolean = {
     op.isInstanceOf[CometBatchScanExec] || op.isInstanceOf[CometScanExec]
+  }
+
+  def applyRowToColumnar(op: SparkPlan): Boolean = {
+    !op.supportsColumnar && isSchemaSupported(op.schema) && op.isInstanceOf[RangeExec]
   }
 
   /** Used for operations that weren't available in Spark 3.2 */

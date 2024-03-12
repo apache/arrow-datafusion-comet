@@ -1117,6 +1117,22 @@ class CometExecSuite extends CometTestBase {
       }
     })
   }
+
+  ignore("test RowToColumnar over RangeExec") {
+    // todo: after fixing arrow shading problem, re-enable this.
+    // note: it can be launched directly from IDEs though.
+    Seq("true", "false").foreach(aqe => {
+      Seq(500, 900).foreach { batchSize =>
+        withSQLConf(
+          SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> aqe,
+          SQLConf.ARROW_EXECUTION_MAX_RECORDS_PER_BATCH.key -> batchSize.toString) {
+          val df = spark.range(1000).selectExpr("id", "id % 8 as k").groupBy("k").sum("id")
+          checkSparkAnswerAndOperator(df)
+        }
+      }
+    })
+  }
+
 }
 
 case class BucketedTableTestSpec(

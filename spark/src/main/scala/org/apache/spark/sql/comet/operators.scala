@@ -238,7 +238,7 @@ abstract class CometNativeExec extends CometExec {
         foreachUntilCometInput(this)(inputs += _.executeColumnar())
 
         if (inputs.isEmpty) {
-          throw new CometRuntimeException(s"No input for CometNativeExec: $this")
+          throw new CometRuntimeException(s"No input for CometNativeExec:\n $this")
         }
 
         ZippedPartitionsRDD(sparkContext, inputs.toSeq)(createCometExecIter(_))
@@ -267,7 +267,8 @@ abstract class CometNativeExec extends CometExec {
     plan match {
       case _: CometScanExec | _: CometBatchScanExec | _: ShuffleQueryStageExec |
           _: AQEShuffleReadExec | _: CometShuffleExchangeExec | _: CometUnionExec |
-          _: CometTakeOrderedAndProjectExec | _: CometCoalesceExec | _: ReusedExchangeExec =>
+          _: CometTakeOrderedAndProjectExec | _: CometCoalesceExec | _: ReusedExchangeExec |
+          _: CometRowToColumnarExec =>
         func(plan)
       case _: CometPlan =>
         // Other Comet operators, continue to traverse the tree.

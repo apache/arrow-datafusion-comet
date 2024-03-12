@@ -34,7 +34,7 @@ import org.apache.parquet.hadoop.example.ExampleParquetWriter
 import org.apache.parquet.schema.{MessageType, MessageTypeParser}
 import org.apache.spark._
 import org.apache.spark.internal.config.{MEMORY_OFFHEAP_ENABLED, MEMORY_OFFHEAP_SIZE, SHUFFLE_MANAGER}
-import org.apache.spark.sql.comet.{CometBatchScanExec, CometBroadcastExchangeExec, CometExec, CometScanExec, CometScanWrapper, CometSinkPlaceHolder}
+import org.apache.spark.sql.comet.{CometBatchScanExec, CometBroadcastExchangeExec, CometExec, CometRowToColumnarExec, CometScanExec, CometScanWrapper, CometSinkPlaceHolder}
 import org.apache.spark.sql.comet.execution.shuffle.{CometColumnarShuffle, CometNativeShuffle, CometShuffleExchangeExec}
 import org.apache.spark.sql.execution.{ColumnarToRowExec, InputAdapter, SparkPlan, WholeStageCodegenExec}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
@@ -154,14 +154,21 @@ abstract class CometTestBase
   }
 
   protected def checkCometOperators(plan: SparkPlan, excludedClasses: Class[_]*): Unit = {
+    val wrappedByRowToColumnar = plan.flatMap {
+      case _ @CometRowToColumnarExec(child: SparkPlan) => child.collectLeaves()
+      case _ => Nil
+    }.toSet
     plan.foreach {
       case _: CometScanExec | _: CometBatchScanExec => true
       case _: CometSinkPlaceHolder | _: CometScanWrapper => false
+      case _: CometRowToColumnarExec => false
       case _: CometExec | _: CometShuffleExchangeExec => true
       case _: CometBroadcastExchangeExec => true
       case _: WholeStageCodegenExec | _: ColumnarToRowExec | _: InputAdapter => true
       case op =>
         if (excludedClasses.exists(c => c.isAssignableFrom(op.getClass))) {
+          true
+        } else if (wrappedByRowToColumnar.contains(op)) {
           true
         } else {
           assert(
