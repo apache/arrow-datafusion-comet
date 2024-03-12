@@ -20,6 +20,7 @@
 package org.apache.comet.serde
 
 import scala.collection.JavaConverters._
+
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate.{AggregateExpression, Average, BitAndAgg, BitOrAgg, BitXorAgg, Count, Final, First, Last, Max, Min, Partial, Sum}
@@ -37,12 +38,12 @@ import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExc
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
+
 import org.apache.comet.CometSparkSessionExtensions.{isCometOperatorEnabled, isCometScan, isSpark32, isSpark34Plus}
-import org.apache.comet.serde.ExprOuterClass.{AggExpr, Expr, ScalarFunc, DataType => ProtoDataType}
+import org.apache.comet.serde.ExprOuterClass.{AggExpr, DataType => ProtoDataType, Expr, ScalarFunc}
 import org.apache.comet.serde.ExprOuterClass.DataType.{DataTypeInfo, DecimalInfo, ListInfo, MapInfo, StructInfo}
-import org.apache.comet.serde.OperatorOuterClass.{Operator, AggregateMode => CometAggregateMode}
+import org.apache.comet.serde.OperatorOuterClass.{AggregateMode => CometAggregateMode, Operator}
 import org.apache.comet.shims.ShimQueryPlanSerde
-import org.apache.spark.sql.execution.window.WindowExec
 
 /**
  * An utility object for query plan and expression serialization.
@@ -195,8 +196,8 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
   }
 
   def windowExprToProto(
-                         windowExpr: WindowExpression,
-                         inputs: Seq[Attribute]): Option[OperatorOuterClass.WindowExpr] = {
+      windowExpr: WindowExpression,
+      inputs: Seq[Attribute]): Option[OperatorOuterClass.WindowExpr] = {
     val func = exprToProto(windowExpr.windowFunction, inputs).getOrElse(return None)
 
     val f = windowExpr.windowSpec.frameSpecification
