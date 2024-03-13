@@ -240,7 +240,7 @@ class CometSparkSessionExtensions
           val nativeOp = QueryPlanSerde.operator2Proto(op).get
           CometScanWrapper(nativeOp, op)
 
-        case leaf: LeafExecNode if applyRowToColumnar(leaf) =>
+        case leaf: LeafExecNode if applyRowToColumnar(conf, leaf) =>
           val cometOp = CometRowToColumnarExec(leaf)
           val nativeOp = QueryPlanSerde.operator2Proto(cometOp).get
           CometSinkPlaceHolder(nativeOp, leaf, cometOp)
