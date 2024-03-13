@@ -336,6 +336,15 @@ object CometConf {
         "enabled when reading from Iceberg tables.")
     .booleanConf
     .createWithDefault(false)
+
+  val COMET_ROW_TO_COLUMNAR_ENABLED: ConfigEntry[Boolean] = conf(
+    "spark.comet.rowToColumnar.enabled")
+    .internal()
+    .doc(
+      "Whether to enable row to columnar conversion for LeafExecNodes. When this is turned on, " +
+        "Comet will convert row-based data to columnar format before processing.")
+    .booleanConf
+    .createWithDefault(false)
 }
 
 object ConfigHelpers {

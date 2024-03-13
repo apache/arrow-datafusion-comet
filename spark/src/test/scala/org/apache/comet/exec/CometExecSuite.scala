@@ -1124,6 +1124,7 @@ class CometExecSuite extends CometTestBase {
     Seq("true", "false").foreach(aqe => {
       Seq(500, 900).foreach { batchSize =>
         withSQLConf(
+          CometConf.COMET_ROW_TO_COLUMNAR_ENABLED.key -> "true",
           SQLConf.ADAPTIVE_EXECUTION_ENABLED.key -> aqe,
           SQLConf.ARROW_EXECUTION_MAX_RECORDS_PER_BATCH.key -> batchSize.toString) {
           val df = spark.range(1000).selectExpr("id", "id % 8 as k").groupBy("k").sum("id")

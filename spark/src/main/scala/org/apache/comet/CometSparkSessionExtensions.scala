@@ -631,8 +631,10 @@ object CometSparkSessionExtensions extends Logging {
     op.isInstanceOf[CometBatchScanExec] || op.isInstanceOf[CometScanExec]
   }
 
-  def applyRowToColumnar(op: SparkPlan): Boolean = {
-    !op.supportsColumnar && isSchemaSupported(op.schema) && op.isInstanceOf[RangeExec]
+  def applyRowToColumnar(conf: SQLConf, op: SparkPlan): Boolean = {
+    COMET_ROW_TO_COLUMNAR_ENABLED.get(conf) &&
+    !op.supportsColumnar && isSchemaSupported(op.schema) &&
+    op.isInstanceOf[RangeExec]
   }
 
   /** Used for operations that weren't available in Spark 3.2 */
