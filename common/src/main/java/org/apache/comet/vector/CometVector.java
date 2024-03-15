@@ -229,7 +229,7 @@ public abstract class CometVector extends ColumnVector {
     }
   }
 
-  public static CometVector getVector(ValueVector vector, boolean useDecimal128) {
+  protected static CometVector getVector(ValueVector vector, boolean useDecimal128) {
     return getVector(vector, useDecimal128, null);
   }
 }

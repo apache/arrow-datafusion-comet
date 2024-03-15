@@ -19,22 +19,31 @@
 
 package org.apache.spark.sql.comet.execution.arrow
 
-import scala.collection.JavaConverters.asScalaBufferConverter
-
+import org.apache.arrow.memory.{BufferAllocator, RootAllocator}
 import org.apache.arrow.vector.VectorSchemaRoot
 import org.apache.spark.TaskContext
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.arrow.ArrowWriter
+import org.apache.spark.sql.comet.util.Utils
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.util.ArrowUtils
 import org.apache.spark.sql.vectorized.ColumnarBatch
 
-import org.apache.comet.vector.CometVector
+import org.apache.comet.vector.NativeUtil
 
 object CometArrowConverters extends Logging {
-  // this is similar how Spark converts internal row to Arrow format except that we are transforming
-  // the result batch to Comet's Internal ColumnarBatch instead of serialized bytes.
+  // TODO: we should reuse the same root allocator in the comet code base?
+  val rootAllocator: BufferAllocator = new RootAllocator(Long.MaxValue)
+
+  // This is similar how Spark converts internal row to Arrow format except that it is transforming
+  // the result batch to Comet's ColumnarBatch instead of serialized bytes.
+  // There's another big difference that Comet may consume the ColumnarBatch by exporting it to
+  // the native side. Hence, we need to:
+  // 1. reset the Arrow writer after the ColumnarBatch is consumed
+  // 2. close the allocator when the task is finished but not when the iterator is all consumed
+  // The reason for the second point is that when ColumnarBatch is exported to the native side, the
+  // exported process increases the reference count of the Arrow vectors. The reference count is
+  // only decreased when the native plan is done with the vectors, which is usually longer than
+  // all the ColumnarBatches are consumed.
   private[sql] class ArrowBatchIterator(
       rowIter: Iterator[InternalRow],
       schema: StructType,
@@ -44,66 +53,70 @@ object CometArrowConverters extends Logging {
       extends Iterator[ColumnarBatch]
       with AutoCloseable {
 
-    // todo: hmm, we need to handle arrow shading problem, as Spark may use a different version of
-    //    arrow.
-    private val arrowSchema =
-      ArrowUtils.toArrowSchema(schema, timeZoneId)
-    // Reuse the same root allocator here, maybe we should also reuse the same allocator in the
-    // comet code base
+    private val arrowSchema = Utils.toArrowSchema(schema, timeZoneId)
+    // Reuse the same root allocator here.
     private val allocator =
-      ArrowUtils.rootAllocator.newChildAllocator(
-        s"to${this.getClass.getSimpleName}",
-        0,
-        Long.MaxValue)
-
+      rootAllocator.newChildAllocator(s"to${this.getClass.getSimpleName}", 0, Long.MaxValue)
     private val root = VectorSchemaRoot.create(arrowSchema, allocator)
     private val arrowWriter = ArrowWriter.create(root)
-    private var columnarBatch: ColumnarBatch = null
+
+    private var currentBatch: ColumnarBatch = null
+    private var closed: Boolean = false
 
     Option(context).foreach {
       _.addTaskCompletionListener[Unit] { _ =>
-        close()
+        close(true)
       }
     }
 
     override def hasNext: Boolean = rowIter.hasNext || {
-      close()
+      close(false)
       false
     }
 
     override def next(): ColumnarBatch = {
-      if (columnarBatch != null) {
-        // reset the arrowWrite and columnarBatch. The reset method is called only after the
-        // columnarBatch is consumed by the caller.
-        arrowWriter.reset()
-        columnarBatch = null
-      }
-      var rowCount = 0L
-      while (rowIter.hasNext && (maxRecordsPerBatch <= 0 || rowCount < maxRecordsPerBatch)) {
-        val row = rowIter.next()
-        arrowWriter.write(row)
-        rowCount += 1
-      }
-      arrowWriter.finish()
-      columnarBatch = wrapperFor(root)
-      columnarBatch
+      currentBatch = nextBatch()
+      currentBatch
     }
 
     override def close(): Unit = {
-      if (columnarBatch != null) {
-        arrowWriter.reset()
-        columnarBatch = null
-      }
-      root.close()
-      allocator.close()
+      close(false)
     }
-  }
 
-  private def wrapperFor(root: VectorSchemaRoot) = {
-    val columns = root.getFieldVectors.asScala.map { vector =>
-      CometVector.getVector(vector, false)
+    private def nextBatch(): ColumnarBatch = {
+      if (rowIter.hasNext) {
+        // the arrow writer shall be reset before writing the next batch
+        arrowWriter.reset()
+        var rowCount = 0L
+        while (rowIter.hasNext && (maxRecordsPerBatch <= 0 || rowCount < maxRecordsPerBatch)) {
+          val row = rowIter.next()
+          arrowWriter.write(row)
+          rowCount += 1
+        }
+        arrowWriter.finish()
+        NativeUtil.rootAsBatch(root)
+      } else {
+        null
+      }
     }
-    new ColumnarBatch(columns.toArray, root.getRowCount)
+
+    private def close(closeAllocator: Boolean): Unit = {
+      try {
+        if (!closed) {
+          if (currentBatch != null) {
+            arrowWriter.reset()
+            currentBatch = null
+          }
+          root.close()
+          closed = true
+        }
+      } finally {
+        // the allocator shall be closed when the task is finished
+        if (closeAllocator) {
+          allocator.close()
+        }
+      }
+    }
   }
 
   def toArrowBatchIterator(

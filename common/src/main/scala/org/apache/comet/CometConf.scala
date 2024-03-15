@@ -345,6 +345,16 @@ object CometConf {
         "Comet will convert row-based data to columnar format before processing.")
     .booleanConf
     .createWithDefault(false)
+
+  val COMET_ROW_TO_COLUMNAR_SOURCE_NODE_LIST: ConfigEntry[Seq[String]] =
+    conf("spark.comet.rowToColumnar.sourceNodeList")
+      .doc(
+        "A comma-separated list of row-based data sources that will be converted to columnar " +
+          "format when 'spark.comet.rowToColumnar.enabled' is true")
+      .stringConf
+      .toSequence
+      .createWithDefault(Seq("Range,InMemoryTableScan"))
+
 }
 
 object ConfigHelpers {

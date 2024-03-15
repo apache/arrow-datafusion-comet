@@ -50,12 +50,11 @@ case class CometRowToColumnarExec(child: SparkPlan)
   override def supportsColumnar: Boolean = true
 
   override lazy val metrics: Map[String, SQLMetric] = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "numInputRows" -> SQLMetrics.createMetric(sparkContext, "number of input rows"),
     "numOutputBatches" -> SQLMetrics.createMetric(sparkContext, "number of output batches"))
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {
-    // todo: add metrics later
-    val numOutputRows = longMetric("numOutputRows")
+    val numInputRows = longMetric("numInputRows")
     val numOutputBatches = longMetric("numOutputBatches")
     val maxRecordsPerBatch = conf.arrowMaxRecordsPerBatch
     val timeZoneId = conf.sessionLocalTimeZone
@@ -71,6 +70,11 @@ case class CometRowToColumnarExec(child: SparkPlan)
           maxRecordsPerBatch,
           timeZoneId,
           context)
+      }
+      .map { batch =>
+        numInputRows += batch.numRows()
+        numOutputBatches += 1
+        batch
       }
   }
 
