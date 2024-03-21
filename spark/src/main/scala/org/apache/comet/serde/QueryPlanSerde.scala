@@ -1645,6 +1645,41 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           } else {
             None
           }
+        case murmur3Hash @ Murmur3Hash(children, seed)
+            if children.forall(c => supportedDataType(c.dataType)) =>
+          // TODO: support list/map/struct type for murmur3 hash
+          val exprs = children.map(exprToProtoInternal(_, inputs))
+          val seedBuilder = ExprOuterClass.Literal
+            .newBuilder()
+            .setDatatype(serializeDataType(IntegerType).get)
+            .setIntVal(seed)
+          val seedExpr = Some(ExprOuterClass.Expr.newBuilder().setLiteral(seedBuilder).build())
+          // the seed is put at the end of the arguments
+          scalarExprToProtoWithReturnType("murmur3_hash", IntegerType, exprs :+ seedExpr: _*)
+
+        case _ @ Md5(child) =>
+          val childExpr = exprToProtoInternal(child, inputs)
+          scalarExprToProtoWithReturnType("md5", StringType, childExpr)
+
+        case _ @ Sha2(left, numBits) if numBits.foldable =>
+          // it's possible for spark to dynamically compute the number of bits from input
+          // expression, however datafusion does not support that yet.
+          val childExpr = exprToProtoInternal(left, inputs)
+          val bits = numBits.eval().asInstanceOf[Int]
+          val algorithm = bits match {
+            case 224 => "sha224"
+            case 256 | 0 => "sha256"
+            case 384 => "sha384"
+            case 512 => "sha512"
+            case _ =>
+              null
+          }
+          if (algorithm == null) {
+            emitWarning(s"numBits evaluated to a unknown value: $bits")
+            exprToProtoInternal(Literal(null, StringType), inputs)
+          } else {
+            scalarExprToProtoWithReturnType(algorithm, StringType, childExpr)
+          }
 
         case e =>
           emitWarning(s"unsupported Spark expression: '$e' of class '${e.getClass.getName}")

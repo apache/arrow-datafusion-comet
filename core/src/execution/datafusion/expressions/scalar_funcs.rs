@@ -16,7 +16,9 @@
 // under the License.
 
 use std::{cmp::min, str::FromStr, sync::Arc};
+use std::fmt::Write;
 
+use crate::execution::datafusion::spark_hash::create_hashes;
 use arrow::{
     array::{
         ArrayRef, AsArray, Decimal128Builder, Float32Array, Float64Array, GenericStringArray,
@@ -24,19 +26,20 @@ use arrow::{
     },
     datatypes::{validate_decimal_precision, Decimal128Type, Int64Type},
 };
-use arrow_array::{Array, ArrowNativeTypeOp, Decimal128Array};
+use arrow_array::{Array, ArrowNativeTypeOp, Decimal128Array, StringArray};
 use arrow_schema::DataType;
 use datafusion::{
     logical_expr::{BuiltinScalarFunction, ScalarFunctionImplementation},
     physical_plan::ColumnarValue,
 };
 use datafusion_common::{
-    cast::as_generic_string_array, exec_err, internal_err, DataFusionError,
-    Result as DataFusionResult, ScalarValue,
+    cast::{as_binary_array, as_generic_string_array},
+    exec_err, internal_err, DataFusionError, Result as DataFusionResult, ScalarValue,
 };
 use datafusion_physical_expr::{
     execution_props::ExecutionProps, functions::create_physical_fun, math_expressions,
 };
+use log::info;
 use num::{BigInt, Signed, ToPrimitive};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -46,6 +49,7 @@ pub fn create_comet_physical_fun(
     execution_props: &ExecutionProps,
     data_type: DataType,
 ) -> Result<ScalarFunctionImplementation, DataFusionError> {
+    let sha2_functions = ["sha224", "sha256", "sha384", "sha512"];
     match fun_name {
         "ceil" => Ok(Arc::new(move |x| spark_ceil(x, &data_type))),
         "floor" => Ok(Arc::new(move |x| spark_floor(x, &data_type))),
@@ -54,6 +58,16 @@ pub fn create_comet_physical_fun(
         "unscaled_value" => Ok(Arc::new(spark_unscaled_value)),
         "make_decimal" => Ok(Arc::new(move |x| spark_make_decimal(x, &data_type))),
         "decimal_div" => Ok(Arc::new(move |x| spark_decimal_div(x, &data_type))),
+        "murmur3_hash" => Ok(Arc::new(move |x| spark_murmur3_hash(x))),
+        sha if sha2_functions.contains(&sha) => {
+            // spark requires hex string as the result of sha2 functions, we have to wrap the
+            // result of digest functions as hex string
+            let fun = &BuiltinScalarFunction::from_str(fun_name)?;
+            let digest = create_physical_fun(fun, execution_props)?;
+            Ok(Arc::new(move |x| {
+                wrap_digest_result_as_hex_string(x, digest.clone())
+            }))
+        }
         _ => {
             let fun = &BuiltinScalarFunction::from_str(fun_name)?;
             create_physical_fun(fun, execution_props)
@@ -494,4 +508,75 @@ fn spark_decimal_div(
     })?;
     let result = result.with_data_type(DataType::Decimal128(p3, s3));
     Ok(ColumnarValue::Array(Arc::new(result)))
+}
+
+fn spark_murmur3_hash(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusionError> {
+    let length = args.len();
+    let seed = &args[length - 1];
+    match seed {
+        ColumnarValue::Scalar(ScalarValue::Int32(Some(seed))) => {
+            // iterate over the arguments to find out the length of the array
+            let num_rows = args[0..args.len() - 1]
+                .iter()
+                .find_map(|arg| match arg {
+                    ColumnarValue::Array(array) => Some(array.len()),
+                    ColumnarValue::Scalar(_) => None,
+                })
+                .unwrap_or(1);
+            let seed_copy = *seed as u32;
+            let mut hashes: Vec<u32> = vec![seed_copy; num_rows];
+            info!("num_rows: {num_rows}, seed: {seed}, hashes: {:?}", hashes);
+            let arrays = args[0..args.len() - 1]
+                .iter()
+                .map(|arg| match arg {
+                    ColumnarValue::Array(array) => array.clone(),
+                    ColumnarValue::Scalar(scalar) => {
+                        scalar.clone().to_array_of_size(num_rows).unwrap()
+                    }
+                })
+                .collect::<Vec<ArrayRef>>();
+            create_hashes(&arrays, &mut hashes)?;
+            info!("after computing hashes: {:?}", hashes);
+            if num_rows == 1 {
+                Ok(ColumnarValue::Scalar(ScalarValue::Int32(Some(
+                    hashes[0] as i32,
+                ))))
+            } else {
+                let hashes: Vec<i32> = hashes.into_iter().map(|x| x as i32).collect();
+                Ok(ColumnarValue::Array(Arc::new(Int32Array::from(hashes))))
+            }
+        }
+        _ => internal_err!("Unsupported data type for function murmur3_hash"),
+    }
+}
+
+#[inline]
+fn hex_encode<T: AsRef<[u8]>>(data: T) -> String {
+    let mut s = String::with_capacity(data.as_ref().len() * 2);
+    for b in data.as_ref() {
+        // Writing to a string never errors, so we can unwrap here.
+        write!(&mut s, "{b:02x}").unwrap();
+    }
+    s
+}
+
+fn wrap_digest_result_as_hex_string(
+    args: &[ColumnarValue],
+    digest: ScalarFunctionImplementation,
+) -> Result<ColumnarValue, DataFusionError> {
+    let value = digest(args)?;
+    Ok(match value {
+        ColumnarValue::Array(array) => {
+            let binary_array = as_binary_array(&array)?;
+            let string_array: StringArray = binary_array
+                .iter()
+                .map(|opt| opt.map(hex_encode::<_>))
+                .collect();
+            ColumnarValue::Array(Arc::new(string_array))
+        }
+        ColumnarValue::Scalar(ScalarValue::Binary(opt)) => {
+            ColumnarValue::Scalar(ScalarValue::Utf8(opt.map(hex_encode::<_>)))
+        }
+        _ => return exec_err!("Impossibly got invalid results from digest"),
+    })
 }
