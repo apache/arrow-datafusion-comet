@@ -1350,7 +1350,7 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           scalarExprToProto("lower", childExpr)
 
         case Md5(child) =>
-          val childExpr = exprToProtoInternal(Cast(child, StringType), inputs)
+          val childExpr = exprToProtoInternal(child, inputs)
           scalarExprToProto("md5", childExpr)
 
         case OctetLength(child) =>
@@ -1628,6 +1628,7 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
             "make_decimal",
             DecimalType(precision, scale),
             childExpr)
+
         case b @ BinaryExpression(_, _) if isBloomFilterMightContain(b) =>
           val bloomFilter = b.left
           val value = b.right
@@ -1645,8 +1646,8 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           } else {
             None
           }
-        case murmur3Hash @ Murmur3Hash(children, seed)
-            if children.forall(c => supportedDataType(c.dataType)) =>
+
+        case Murmur3Hash(children, seed) if children.forall(c => supportedDataType(c.dataType)) =>
           // TODO: support list/map/struct type for murmur3 hash
           val exprs = children.map(exprToProtoInternal(_, inputs))
           val seedBuilder = ExprOuterClass.Literal
@@ -1657,13 +1658,9 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           // the seed is put at the end of the arguments
           scalarExprToProtoWithReturnType("murmur3_hash", IntegerType, exprs :+ seedExpr: _*)
 
-        case _ @Md5(child) =>
-          val childExpr = exprToProtoInternal(child, inputs)
-          scalarExprToProtoWithReturnType("md5", StringType, childExpr)
-
-        case _ @Sha2(left, numBits) if numBits.foldable =>
+        case Sha2(left, numBits) if numBits.foldable =>
           // it's possible for spark to dynamically compute the number of bits from input
-          // expression, however datafusion does not support that yet.
+          // expression, however DataFusion does not support that yet.
           val childExpr = exprToProtoInternal(left, inputs)
           val bits = numBits.eval().asInstanceOf[Int]
           val algorithm = bits match {
