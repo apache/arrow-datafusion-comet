@@ -1657,11 +1657,11 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           // the seed is put at the end of the arguments
           scalarExprToProtoWithReturnType("murmur3_hash", IntegerType, exprs :+ seedExpr: _*)
 
-        case _ @ Md5(child) =>
+        case _ @Md5(child) =>
           val childExpr = exprToProtoInternal(child, inputs)
           scalarExprToProtoWithReturnType("md5", StringType, childExpr)
 
-        case _ @ Sha2(left, numBits) if numBits.foldable =>
+        case _ @Sha2(left, numBits) if numBits.foldable =>
           // it's possible for spark to dynamically compute the number of bits from input
           // expression, however datafusion does not support that yet.
           val childExpr = exprToProtoInternal(left, inputs)

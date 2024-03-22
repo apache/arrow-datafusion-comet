@@ -15,8 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::{cmp::min, str::FromStr, sync::Arc};
-use std::fmt::Write;
+use std::{cmp::min, fmt::Write, str::FromStr, sync::Arc};
 
 use crate::execution::datafusion::spark_hash::create_hashes;
 use arrow::{
@@ -39,7 +38,6 @@ use datafusion_common::{
 use datafusion_physical_expr::{
     execution_props::ExecutionProps, functions::create_physical_fun, math_expressions,
 };
-use log::info;
 use num::{BigInt, Signed, ToPrimitive};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -523,9 +521,8 @@ fn spark_murmur3_hash(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusio
                     ColumnarValue::Scalar(_) => None,
                 })
                 .unwrap_or(1);
-            let seed_copy = *seed as u32;
-            let mut hashes: Vec<u32> = vec![seed_copy; num_rows];
-            info!("num_rows: {num_rows}, seed: {seed}, hashes: {:?}", hashes);
+            let mut hashes: Vec<u32> = vec![0_u32; num_rows];
+            hashes.fill(*seed as u32);
             let arrays = args[0..args.len() - 1]
                 .iter()
                 .map(|arg| match arg {
@@ -536,7 +533,6 @@ fn spark_murmur3_hash(args: &[ColumnarValue]) -> Result<ColumnarValue, DataFusio
                 })
                 .collect::<Vec<ArrayRef>>();
             create_hashes(&arrays, &mut hashes)?;
-            info!("after computing hashes: {:?}", hashes);
             if num_rows == 1 {
                 Ok(ColumnarValue::Scalar(ScalarValue::Int32(Some(
                     hashes[0] as i32,

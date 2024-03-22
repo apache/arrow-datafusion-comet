@@ -1389,22 +1389,18 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
         val table = "test"
         withTable(table) {
           sql(s"create table $table(col string, a int, b float) using parquet")
-          sql(
-            s"""
+          sql(s"""
              |insert into $table values
              |('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
              |, ('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
              |""".stripMargin)
-          checkSparkAnswerAndOperator(
-            s"""
+          checkSparkAnswerAndOperator(s"""
                |select
-               |-- md5(col),
-               |-- hash(col), hash(col, 1), hash(col, 0),
-               |hash(col, a, b)-- , hash(b, a, col)
-               |-- sha2(col, 0), sha2(col, 256), sha2(col, 224), sha2(col, 384), sha2(col, 512), sha2(col, 128)
+               |md5(col),
+               |hash(col), hash(col, 1), hash(col, 0), hash(col, a, b), hash(b, a, col),
+               |sha2(col, 0), sha2(col, 256), sha2(col, 224), sha2(col, 384), sha2(col, 512), sha2(col, 128)
                |from test
-               |""".stripMargin
-          )
+               |""".stripMargin)
         }
       }
     }
