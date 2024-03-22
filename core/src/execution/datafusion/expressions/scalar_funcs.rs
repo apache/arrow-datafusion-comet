@@ -56,7 +56,7 @@ pub fn create_comet_physical_fun(
         "unscaled_value" => Ok(Arc::new(spark_unscaled_value)),
         "make_decimal" => Ok(Arc::new(move |x| spark_make_decimal(x, &data_type))),
         "decimal_div" => Ok(Arc::new(move |x| spark_decimal_div(x, &data_type))),
-        "murmur3_hash" => Ok(Arc::new(move |x| spark_murmur3_hash(x))),
+        "murmur3_hash" => Ok(Arc::new(spark_murmur3_hash)),
         sha if sha2_functions.contains(&sha) => {
             // spark requires hex string as the result of sha2 functions, we have to wrap the
             // result of digest functions as hex string
