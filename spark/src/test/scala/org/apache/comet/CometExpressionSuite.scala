@@ -1394,7 +1394,7 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
              |('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
              |, ('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
              |""".stripMargin)
-          checkSparkAnswerAndOperator(s"""
+          checkSparkAnswerAndOperator("""
                |select
                |md5(col),
                |hash(col), hash(col, 1), hash(col, 0), hash(col, a, b), hash(b, a, col),
