@@ -30,6 +30,7 @@ import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.comet._
 import org.apache.spark.sql.comet.execution.shuffle.{CometColumnarShuffle, CometNativeShuffle}
 import org.apache.spark.sql.comet.execution.shuffle.CometShuffleExchangeExec
+import org.apache.spark.sql.comet.util.Utils
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.ShuffleQueryStageExec
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
@@ -43,7 +44,7 @@ import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
 import org.apache.comet.CometConf._
-import org.apache.comet.CometSparkSessionExtensions.{isANSIEnabled, isCometBroadCastEnabled, isCometColumnarShuffleEnabled, isCometEnabled, isCometExecEnabled, isCometOperatorEnabled, isCometScan, isCometScanEnabled, isCometShuffleEnabled, isSchemaSupported}
+import org.apache.comet.CometSparkSessionExtensions.{applyRowToColumnar, isANSIEnabled, isCometBroadCastEnabled, isCometColumnarShuffleEnabled, isCometEnabled, isCometExecEnabled, isCometOperatorEnabled, isCometScan, isCometScanEnabled, isCometShuffleEnabled, isSchemaSupported}
 import org.apache.comet.parquet.{CometParquetScan, SupportsComet}
 import org.apache.comet.serde.OperatorOuterClass.Operator
 import org.apache.comet.serde.QueryPlanSerde
@@ -237,6 +238,14 @@ class CometSparkSessionExtensions
         case op if isCometScan(op) =>
           val nativeOp = QueryPlanSerde.operator2Proto(op).get
           CometScanWrapper(nativeOp, op)
+
+        case leaf: LeafExecNode if applyRowToColumnar(conf, leaf) =>
+          // Currently, the LeafExecNode is converted to Columnar regardless whether a columnar
+          // execution/output is required if it's configured to.
+          // TODO: make a better decision about whether to apply CometRowToColumnarExec here
+          val cometOp = CometRowToColumnarExec(leaf)
+          val nativeOp = QueryPlanSerde.operator2Proto(cometOp).get
+          CometScanWrapper(nativeOp, cometOp)
 
         case op: ProjectExec =>
           val newOp = transform1(op)
@@ -665,6 +674,15 @@ object CometSparkSessionExtensions extends Logging {
 
   def isCometScan(op: SparkPlan): Boolean = {
     op.isInstanceOf[CometBatchScanExec] || op.isInstanceOf[CometScanExec]
+  }
+
+  private def applyRowToColumnar(conf: SQLConf, op: SparkPlan): Boolean = {
+    !op.supportsColumnar && isSchemaSupported(op.schema) &&
+    COMET_ROW_TO_COLUMNAR_ENABLED.get(conf) && {
+      val simpleClassName = Utils.getSimpleName(op.getClass)
+      val nodeName = simpleClassName.replaceAll("Exec$", "")
+      COMET_ROW_TO_COLUMNAR_SOURCE_NODE_LIST.get(conf).contains(nodeName)
+    }
   }
 
   /** Used for operations that weren't available in Spark 3.2 */

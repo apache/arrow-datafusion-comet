@@ -210,4 +210,20 @@ class NativeUtil {
       case _ => throw new SparkException(s"Unsupported Arrow Vector: ${valueVector.getClass}")
     }
   }
+
+}
+
+object NativeUtil {
+  def rootAsBatch(arrowRoot: VectorSchemaRoot): ColumnarBatch = {
+    rootAsBatch(arrowRoot, null)
+  }
+
+  def rootAsBatch(arrowRoot: VectorSchemaRoot, provider: DictionaryProvider): ColumnarBatch = {
+    val vectors = (0 until arrowRoot.getFieldVectors.size()).map { i =>
+      val vector = arrowRoot.getFieldVectors.get(i)
+      // Native shuffle always uses decimal128.
+      CometVector.getVector(vector, true, provider)
+    }
+    new ColumnarBatch(vectors.toArray, arrowRoot.getRowCount)
+  }
 }
