@@ -31,12 +31,14 @@ import org.apache.spark.sql.comet._
 import org.apache.spark.sql.comet.execution.shuffle.{CometColumnarShuffle, CometNativeShuffle}
 import org.apache.spark.sql.comet.execution.shuffle.CometShuffleExchangeExec
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, ShuffleQueryStageExec}
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
 import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
-import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ShuffleExchangeExec}
+import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec, ShuffleExchangeExec}
+import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
@@ -221,12 +223,13 @@ class CometSparkSessionExtensions
      */
     // spotless:on
     private def transform(plan: SparkPlan): SparkPlan = {
-      def transform1(op: UnaryExecNode): Option[Operator] = {
-        op.child match {
-          case childNativeOp: CometNativeExec =>
-            QueryPlanSerde.operator2Proto(op, childNativeOp.nativeOp)
-          case _ =>
-            None
+      def transform1(op: SparkPlan): Option[Operator] = {
+        if (op.children.forall(_.isInstanceOf[CometNativeExec])) {
+          QueryPlanSerde.operator2Proto(
+            op,
+            op.children.map(_.asInstanceOf[CometNativeExec].nativeOp): _*)
+        } else {
+          None
         }
       }
 
@@ -332,6 +335,68 @@ class CometSparkSessionExtensions
               op
           }
 
+        case op: ShuffledHashJoinExec
+            if isCometOperatorEnabled(conf, "hash_join") &&
+              op.children.forall(isCometNative(_)) =>
+          val newOp = transform1(op)
+          newOp match {
+            case Some(nativeOp) =>
+              CometHashJoinExec(
+                nativeOp,
+                op,
+                op.leftKeys,
+                op.rightKeys,
+                op.joinType,
+                op.condition,
+                op.buildSide,
+                op.left,
+                op.right,
+                SerializedPlan(None))
+            case None =>
+              op
+          }
+
+        case op: BroadcastHashJoinExec
+            if isCometOperatorEnabled(conf, "broadcast_hash_join") &&
+              op.children.forall(isCometNative(_)) =>
+          val newOp = transform1(op)
+          newOp match {
+            case Some(nativeOp) =>
+              CometBroadcastHashJoinExec(
+                nativeOp,
+                op,
+                op.leftKeys,
+                op.rightKeys,
+                op.joinType,
+                op.condition,
+                op.buildSide,
+                op.left,
+                op.right,
+                SerializedPlan(None))
+            case None =>
+              op
+          }
+
+        case op: SortMergeJoinExec
+            if isCometOperatorEnabled(conf, "sort_merge_join") &&
+              op.children.forall(isCometNative(_)) =>
+          val newOp = transform1(op)
+          newOp match {
+            case Some(nativeOp) =>
+              CometSortMergeJoinExec(
+                nativeOp,
+                op,
+                op.leftKeys,
+                op.rightKeys,
+                op.joinType,
+                op.condition,
+                op.left,
+                op.right,
+                SerializedPlan(None))
+            case None =>
+              op
+          }
+
         case c @ CoalesceExec(numPartitions, child)
             if isCometOperatorEnabled(conf, "coalesce")
               && isCometNative(child) =>
@@ -367,6 +432,16 @@ class CometSparkSessionExtensions
               u
           }
 
+        // For AQE broadcast stage on a Comet broadcast exchange
+        case s @ BroadcastQueryStageExec(_, _: CometBroadcastExchangeExec, _) =>
+          val newOp = transform1(s)
+          newOp match {
+            case Some(nativeOp) =>
+              CometSinkPlaceHolder(nativeOp, s, s)
+            case None =>
+              s
+          }
+
         // `CometBroadcastExchangeExec`'s broadcast output is not compatible with Spark's broadcast
         // exchange. It is only used for Comet native execution. We only transform Spark broadcast
         // exchange to Comet broadcast exchange if its downstream is a Comet native plan or if the
@@ -387,6 +462,31 @@ class CometSparkSessionExtensions
             case other => other
           }
           plan.withNewChildren(newChildren)
+
+        // For AQE shuffle stage on a Comet shuffle exchange
+        case s @ ShuffleQueryStageExec(_, _: CometShuffleExchangeExec, _) =>
+          val newOp = transform1(s)
+          newOp match {
+            case Some(nativeOp) =>
+              CometSinkPlaceHolder(nativeOp, s, s)
+            case None =>
+              s
+          }
+
+        // For AQE shuffle stage on a reused Comet shuffle exchange
+        // Note that we don't need to handle `ReusedExchangeExec` for non-AQE case, because
+        // the query plan won't be re-optimized/planned in non-AQE mode.
+        case s @ ShuffleQueryStageExec(
+              _,
+              ReusedExchangeExec(_, _: CometShuffleExchangeExec),
+              _) =>
+          val newOp = transform1(s)
+          newOp match {
+            case Some(nativeOp) =>
+              CometSinkPlaceHolder(nativeOp, s, s)
+            case None =>
+              s
+          }
 
         // Native shuffle for Comet operators
         case s: ShuffleExchangeExec

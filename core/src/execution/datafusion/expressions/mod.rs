@@ -26,6 +26,7 @@ pub mod scalar_funcs;
 pub use normalize_nan::NormalizeNaNAndZero;
 pub mod avg;
 pub mod avg_decimal;
+pub mod bloom_filter_might_contain;
 pub mod strings;
 pub mod subquery;
 pub mod sum_decimal;

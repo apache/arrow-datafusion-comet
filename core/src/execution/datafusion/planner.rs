@@ -17,7 +17,7 @@
 
 //! Converts Spark physical plan to DataFusion physical plan
 
-use std::{str::FromStr, sync::Arc};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use datafusion::{
@@ -27,9 +27,9 @@ use datafusion::{
     physical_expr::{
         execution_props::ExecutionProps,
         expressions::{
-            in_list, BinaryExpr, CaseExpr, CastExpr, Column, Count, FirstValue, InListExpr,
-            IsNotNullExpr, IsNullExpr, LastValue, Literal as DataFusionLiteral, Max, Min,
-            NegativeExpr, NotExpr, Sum, UnKnownColumn,
+            in_list, BinaryExpr, BitAnd, BitOr, BitXor, CaseExpr, CastExpr, Column, Count,
+            FirstValue, InListExpr, IsNotNullExpr, IsNullExpr, LastValue,
+            Literal as DataFusionLiteral, Max, Min, NegativeExpr, NotExpr, Sum, UnKnownColumn,
         },
         functions::create_physical_expr,
         AggregateExpr, PhysicalExpr, PhysicalSortExpr, ScalarFunctionExpr,
@@ -37,13 +37,17 @@ use datafusion::{
     physical_plan::{
         aggregates::{AggregateMode as DFAggregateMode, PhysicalGroupBy},
         filter::FilterExec,
+        joins::{utils::JoinFilter, HashJoinExec, PartitionMode, SortMergeJoinExec},
         limit::LocalLimitExec,
         projection::ProjectionExec,
         sorts::sort::SortExec,
         ExecutionPlan, Partitioning,
     },
 };
-use datafusion_common::ScalarValue;
+use datafusion_common::{
+    tree_node::{TreeNode, TreeNodeRewriter, VisitRecursion},
+    JoinType as DFJoinType, ScalarValue,
+};
 use itertools::Itertools;
 use jni::objects::GlobalRef;
 use num::{BigInt, ToPrimitive};
@@ -56,6 +60,7 @@ use crate::{
                 avg::Avg,
                 avg_decimal::AvgDecimal,
                 bitwise_not::BitwiseNotExpr,
+                bloom_filter_might_contain::BloomFilterMightContain,
                 cast::Cast,
                 checkoverflow::CheckOverflow,
                 if_expr::IfExpr,
@@ -76,7 +81,7 @@ use crate::{
             agg_expr::ExprStruct as AggExprStruct, expr::ExprStruct, literal::Value, AggExpr, Expr,
             ScalarFunc,
         },
-        spark_operator::{operator::OpStruct, Operator},
+        spark_operator::{operator::OpStruct, JoinType, Operator},
         spark_partitioning::{partitioning::PartitioningStruct, Partitioning as SparkPartitioning},
     },
 };
@@ -86,6 +91,14 @@ type ExecResult<T> = Result<T, ExecutionError>;
 type PhyAggResult = Result<Vec<Arc<dyn AggregateExpr>>, ExecutionError>;
 type PhyExprResult = Result<Vec<(Arc<dyn PhysicalExpr>, String)>, ExecutionError>;
 type PartitionPhyExprResult = Result<Vec<Arc<dyn PhysicalExpr>>, ExecutionError>;
+
+struct JoinParameters {
+    pub left: Arc<dyn ExecutionPlan>,
+    pub right: Arc<dyn ExecutionPlan>,
+    pub join_on: Vec<(Arc<dyn PhysicalExpr>, Arc<dyn PhysicalExpr>)>,
+    pub join_filter: Option<JoinFilter>,
+    pub join_type: DFJoinType,
+}
 
 pub const TEST_EXEC_CONTEXT_ID: i64 = -1;
 
@@ -534,6 +547,15 @@ impl PhysicalPlanner {
                 let data_type = to_arrow_datatype(expr.datatype.as_ref().unwrap());
                 Ok(Arc::new(Subquery::new(self.exec_context_id, id, data_type)))
             }
+            ExprStruct::BloomFilterMightContain(expr) => {
+                let bloom_filter_expr =
+                    self.create_expr(expr.bloom_filter.as_ref().unwrap(), input_schema.clone())?;
+                let value_expr = self.create_expr(expr.value.as_ref().unwrap(), input_schema)?;
+                Ok(Arc::new(BloomFilterMightContain::try_new(
+                    bloom_filter_expr,
+                    value_expr,
+                )?))
+            }
             expr => Err(ExecutionError::GeneralError(format!(
                 "Not implemented: {:?}",
                 expr
@@ -858,7 +880,197 @@ impl PhysicalPlanner {
                     Arc::new(CometExpandExec::new(projections, child, schema)),
                 ))
             }
+            OpStruct::SortMergeJoin(join) => {
+                let (join_params, scans) = self.parse_join_parameters(
+                    inputs,
+                    children,
+                    &join.left_join_keys,
+                    &join.right_join_keys,
+                    join.join_type,
+                    &None,
+                )?;
+
+                let sort_options = join
+                    .sort_options
+                    .iter()
+                    .map(|sort_option| {
+                        let sort_expr = self
+                            .create_sort_expr(sort_option, join_params.left.schema())
+                            .unwrap();
+                        SortOptions {
+                            descending: sort_expr.options.descending,
+                            nulls_first: sort_expr.options.nulls_first,
+                        }
+                    })
+                    .collect();
+
+                let join = Arc::new(SortMergeJoinExec::try_new(
+                    join_params.left,
+                    join_params.right,
+                    join_params.join_on,
+                    join_params.join_filter,
+                    join_params.join_type,
+                    sort_options,
+                    // null doesn't equal to null in Spark join key. If the join key is
+                    // `EqualNullSafe`, Spark will rewrite it during planning.
+                    false,
+                )?);
+
+                Ok((scans, join))
+            }
+            OpStruct::HashJoin(join) => {
+                let (join_params, scans) = self.parse_join_parameters(
+                    inputs,
+                    children,
+                    &join.left_join_keys,
+                    &join.right_join_keys,
+                    join.join_type,
+                    &join.condition,
+                )?;
+                let join = Arc::new(HashJoinExec::try_new(
+                    join_params.left,
+                    join_params.right,
+                    join_params.join_on,
+                    join_params.join_filter,
+                    &join_params.join_type,
+                    PartitionMode::Partitioned,
+                    // null doesn't equal to null in Spark join key. If the join key is
+                    // `EqualNullSafe`, Spark will rewrite it during planning.
+                    false,
+                )?);
+                Ok((scans, join))
+            }
         }
+    }
+
+    fn parse_join_parameters(
+        &self,
+        inputs: &mut Vec<Arc<GlobalRef>>,
+        children: &[Operator],
+        left_join_keys: &[Expr],
+        right_join_keys: &[Expr],
+        join_type: i32,
+        condition: &Option<Expr>,
+    ) -> Result<(JoinParameters, Vec<ScanExec>), ExecutionError> {
+        assert!(children.len() == 2);
+        let (mut left_scans, left) = self.create_plan(&children[0], inputs)?;
+        let (mut right_scans, right) = self.create_plan(&children[1], inputs)?;
+
+        left_scans.append(&mut right_scans);
+
+        let left_join_exprs: Vec<_> = left_join_keys
+            .iter()
+            .map(|expr| self.create_expr(expr, left.schema()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let right_join_exprs: Vec<_> = right_join_keys
+            .iter()
+            .map(|expr| self.create_expr(expr, right.schema()))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let join_on = left_join_exprs
+            .into_iter()
+            .zip(right_join_exprs)
+            .collect::<Vec<_>>();
+
+        let join_type = match join_type.try_into() {
+            Ok(JoinType::Inner) => DFJoinType::Inner,
+            Ok(JoinType::LeftOuter) => DFJoinType::Left,
+            Ok(JoinType::RightOuter) => DFJoinType::Right,
+            Ok(JoinType::FullOuter) => DFJoinType::Full,
+            Ok(JoinType::LeftSemi) => DFJoinType::LeftSemi,
+            Ok(JoinType::RightSemi) => DFJoinType::RightSemi,
+            Ok(JoinType::LeftAnti) => DFJoinType::LeftAnti,
+            Ok(JoinType::RightAnti) => DFJoinType::RightAnti,
+            Err(_) => {
+                return Err(ExecutionError::GeneralError(format!(
+                    "Unsupported join type: {:?}",
+                    join_type
+                )));
+            }
+        };
+
+        // Handle join filter as DataFusion `JoinFilter` struct
+        let join_filter = if let Some(expr) = condition {
+            let left_schema = left.schema();
+            let right_schema = right.schema();
+            let left_fields = left_schema.fields();
+            let right_fields = right_schema.fields();
+            let all_fields: Vec<_> = left_fields
+                .into_iter()
+                .chain(right_fields)
+                .cloned()
+                .collect();
+            let full_schema = Arc::new(Schema::new(all_fields));
+
+            let physical_expr = self.create_expr(expr, full_schema)?;
+            let (left_field_indices, right_field_indices) =
+                expr_to_columns(&physical_expr, left_fields.len(), right_fields.len())?;
+            let column_indices = JoinFilter::build_column_indices(
+                left_field_indices.clone(),
+                right_field_indices.clone(),
+            );
+
+            let filter_fields: Vec<Field> = left_field_indices
+                .clone()
+                .into_iter()
+                .map(|i| left.schema().field(i).clone())
+                .chain(
+                    right_field_indices
+                        .clone()
+                        .into_iter()
+                        .map(|i| right.schema().field(i).clone()),
+                )
+                .collect_vec();
+
+            let filter_schema = Schema::new_with_metadata(filter_fields, HashMap::new());
+
+            // Rewrite the physical expression to use the new column indices.
+            // DataFusion's join filter is bound to intermediate schema which contains
+            // only the fields used in the filter expression. But the Spark's join filter
+            // expression is bound to the full schema. We need to rewrite the physical
+            // expression to use the new column indices.
+            let rewritten_physical_expr = rewrite_physical_expr(
+                physical_expr,
+                left_schema.fields.len(),
+                right_schema.fields.len(),
+                &left_field_indices,
+                &right_field_indices,
+            )?;
+
+            Some(JoinFilter::new(
+                rewritten_physical_expr,
+                column_indices,
+                filter_schema,
+            ))
+        } else {
+            None
+        };
+
+        // DataFusion Join operators keep the input batch internally. We need
+        // to copy the input batch to avoid the data corruption from reusing the input
+        // batch.
+        let left = if can_reuse_input_batch(&left) {
+            Arc::new(CopyExec::new(left))
+        } else {
+            left
+        };
+
+        let right = if can_reuse_input_batch(&right) {
+            Arc::new(CopyExec::new(right))
+        } else {
+            right
+        };
+
+        Ok((
+            JoinParameters {
+                left,
+                right,
+                join_on,
+                join_type,
+                join_filter,
+            },
+            left_scans,
+        ))
     }
 
     /// Create a DataFusion physical aggregate expression from Spark physical aggregate expression
@@ -939,6 +1151,21 @@ impl PhysicalPlanner {
                     vec![],
                     vec![],
                 )))
+            }
+            AggExprStruct::BitAndAgg(expr) => {
+                let child = self.create_expr(expr.child.as_ref().unwrap(), schema)?;
+                let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
+                Ok(Arc::new(BitAnd::new(child, "bit_and", datatype)))
+            }
+            AggExprStruct::BitOrAgg(expr) => {
+                let child = self.create_expr(expr.child.as_ref().unwrap(), schema)?;
+                let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
+                Ok(Arc::new(BitOr::new(child, "bit_or", datatype)))
+            }
+            AggExprStruct::BitXorAgg(expr) => {
+                let child = self.create_expr(expr.child.as_ref().unwrap(), schema)?;
+                let datatype = to_arrow_datatype(expr.datatype.as_ref().unwrap());
+                Ok(Arc::new(BitXor::new(child, "bit_xor", datatype)))
             }
         }
     }
@@ -1024,6 +1251,143 @@ impl From<ExpressionError> for DataFusionError {
     fn from(value: ExpressionError) -> Self {
         DataFusionError::Execution(value.to_string())
     }
+}
+
+/// Returns true if given operator can return input array as output array without
+/// modification. This is used to determine if we need to copy the input batch to avoid
+/// data corruption from reusing the input batch.
+fn can_reuse_input_batch(op: &Arc<dyn ExecutionPlan>) -> bool {
+    op.as_any().downcast_ref::<ScanExec>().is_some()
+        || op.as_any().downcast_ref::<LocalLimitExec>().is_some()
+        || op.as_any().downcast_ref::<ProjectionExec>().is_some()
+        || op.as_any().downcast_ref::<FilterExec>().is_some()
+}
+
+/// Collects the indices of the columns in the input schema that are used in the expression
+/// and returns them as a pair of vectors, one for the left side and one for the right side.
+fn expr_to_columns(
+    expr: &Arc<dyn PhysicalExpr>,
+    left_field_len: usize,
+    right_field_len: usize,
+) -> Result<(Vec<usize>, Vec<usize>), ExecutionError> {
+    let mut left_field_indices: Vec<usize> = vec![];
+    let mut right_field_indices: Vec<usize> = vec![];
+
+    expr.apply(&mut |expr| {
+        Ok({
+            if let Some(column) = expr.as_any().downcast_ref::<Column>() {
+                if column.index() > left_field_len + right_field_len {
+                    return Err(DataFusionError::Internal(format!(
+                        "Column index {} out of range",
+                        column.index()
+                    )));
+                } else if column.index() < left_field_len {
+                    left_field_indices.push(column.index());
+                } else {
+                    right_field_indices.push(column.index() - left_field_len);
+                }
+            }
+            VisitRecursion::Continue
+        })
+    })?;
+
+    left_field_indices.sort();
+    right_field_indices.sort();
+
+    Ok((left_field_indices, right_field_indices))
+}
+
+/// A physical join filter rewritter which rewrites the column indices in the expression
+/// to use the new column indices. See `rewrite_physical_expr`.
+struct JoinFilterRewriter<'a> {
+    left_field_len: usize,
+    right_field_len: usize,
+    left_field_indices: &'a [usize],
+    right_field_indices: &'a [usize],
+}
+
+impl JoinFilterRewriter<'_> {
+    fn new<'a>(
+        left_field_len: usize,
+        right_field_len: usize,
+        left_field_indices: &'a [usize],
+        right_field_indices: &'a [usize],
+    ) -> JoinFilterRewriter<'a> {
+        JoinFilterRewriter {
+            left_field_len,
+            right_field_len,
+            left_field_indices,
+            right_field_indices,
+        }
+    }
+}
+
+impl TreeNodeRewriter for JoinFilterRewriter<'_> {
+    type N = Arc<dyn PhysicalExpr>;
+
+    fn mutate(&mut self, node: Self::N) -> datafusion_common::Result<Self::N> {
+        let new_expr: Arc<dyn PhysicalExpr> =
+            if let Some(column) = node.as_any().downcast_ref::<Column>() {
+                if column.index() < self.left_field_len {
+                    // left side
+                    let new_index = self
+                        .left_field_indices
+                        .iter()
+                        .position(|&x| x == column.index())
+                        .ok_or_else(|| {
+                            DataFusionError::Internal(format!(
+                                "Column index {} not found in left field indices",
+                                column.index()
+                            ))
+                        })?;
+                    Arc::new(Column::new(column.name(), new_index))
+                } else if column.index() < self.left_field_len + self.right_field_len {
+                    // right side
+                    let new_index = self
+                        .right_field_indices
+                        .iter()
+                        .position(|&x| x + self.left_field_len == column.index())
+                        .ok_or_else(|| {
+                            DataFusionError::Internal(format!(
+                                "Column index {} not found in right field indices",
+                                column.index()
+                            ))
+                        })?;
+                    Arc::new(Column::new(
+                        column.name(),
+                        new_index + self.left_field_indices.len(),
+                    ))
+                } else {
+                    return Err(DataFusionError::Internal(format!(
+                        "Column index {} out of range",
+                        column.index()
+                    )));
+                }
+            } else {
+                node.clone()
+            };
+        Ok(new_expr)
+    }
+}
+
+/// Rewrites the physical expression to use the new column indices.
+/// This is necessary when the physical expression is used in a join filter, as the column
+/// indices are different from the original schema.
+fn rewrite_physical_expr(
+    expr: Arc<dyn PhysicalExpr>,
+    left_field_len: usize,
+    right_field_len: usize,
+    left_field_indices: &[usize],
+    right_field_indices: &[usize],
+) -> Result<Arc<dyn PhysicalExpr>, ExecutionError> {
+    let mut rewriter = JoinFilterRewriter::new(
+        left_field_len,
+        right_field_len,
+        left_field_indices,
+        right_field_indices,
+    );
+
+    Ok(expr.rewrite(&mut rewriter)?)
 }
 
 #[cfg(test)]
