@@ -59,8 +59,7 @@ use crate::{
             expressions::{
                 avg::Avg,
                 avg_decimal::AvgDecimal,
-                covariance::Covariance,
-                covariance::CovariancePop,
+                covariance::{Covariance, CovariancePop},
                 bitwise_not::BitwiseNotExpr,
                 bloom_filter_might_contain::BloomFilterMightContain,
                 cast::Cast,

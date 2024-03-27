@@ -17,21 +17,22 @@
 
 //! Defines physical expressions that can evaluated at runtime during query execution
 
-use std::any::Any;
-use std::sync::Arc;
+use std::{any::Any, sync::Arc};
 
-use arrow::array::Float64Array;
 use arrow::{
-    array::{ArrayRef, Int64Array},
+    array::{ArrayRef, Float64Array, Int64Array},
     compute::cast,
-    datatypes::DataType,
-    datatypes::Field,
+    datatypes::{DataType, Field},
 };
 use datafusion::logical_expr::Accumulator;
-use datafusion_common::{downcast_value, unwrap_or_internal_err, ScalarValue};
-use datafusion_common::{DataFusionError, Result};
-use datafusion_physical_expr::{aggregate::utils::down_cast_any_ref, expressions::format_state_name, AggregateExpr, PhysicalExpr};
-use datafusion_physical_expr::expressions::StatsType;
+use datafusion_common::{
+    downcast_value, unwrap_or_internal_err, DataFusionError, Result, ScalarValue,
+};
+use datafusion_physical_expr::{
+    aggregate::utils::down_cast_any_ref,
+    expressions::{format_state_name, StatsType},
+    AggregateExpr, PhysicalExpr,
+};
 
 /// COVAR and COVAR_SAMP aggregate expression
 #[derive(Debug, Clone)]
@@ -119,9 +120,7 @@ impl PartialEq<dyn Any> for Covariance {
     fn eq(&self, other: &dyn Any) -> bool {
         down_cast_any_ref(other)
             .downcast_ref::<Self>()
-            .map(|x| {
-                self.name == x.name && self.expr1.eq(&x.expr1) && self.expr2.eq(&x.expr2)
-            })
+            .map(|x| self.name == x.name && self.expr1.eq(&x.expr1) && self.expr2.eq(&x.expr2))
             .unwrap_or(false)
     }
 }
@@ -198,9 +197,7 @@ impl PartialEq<dyn Any> for CovariancePop {
     fn eq(&self, other: &dyn Any) -> bool {
         down_cast_any_ref(other)
             .downcast_ref::<Self>()
-            .map(|x| {
-                self.name == x.name && self.expr1.eq(&x.expr1) && self.expr2.eq(&x.expr2)
-            })
+            .map(|x| self.name == x.name && self.expr1.eq(&x.expr1) && self.expr2.eq(&x.expr2))
             .unwrap_or(false)
     }
 }
