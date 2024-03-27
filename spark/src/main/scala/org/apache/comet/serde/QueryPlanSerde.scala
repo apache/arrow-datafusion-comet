@@ -1350,7 +1350,7 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
           scalarExprToProto("lower", childExpr)
 
         case Md5(child) =>
-          val childExpr = exprToProtoInternal(Cast(child, StringType), inputs)
+          val childExpr = exprToProtoInternal(child, inputs)
           scalarExprToProto("md5", childExpr)
 
         case OctetLength(child) =>
@@ -1628,6 +1628,7 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
             "make_decimal",
             DecimalType(precision, scale),
             childExpr)
+
         case b @ BinaryExpression(_, _) if isBloomFilterMightContain(b) =>
           val bloomFilter = b.left
           val value = b.right
@@ -1644,6 +1645,37 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde {
                 .build())
           } else {
             None
+          }
+
+        case Murmur3Hash(children, seed) if children.forall(c => supportedDataType(c.dataType)) =>
+          // TODO: support list/map/struct type for murmur3 hash
+          val exprs = children.map(exprToProtoInternal(_, inputs))
+          val seedBuilder = ExprOuterClass.Literal
+            .newBuilder()
+            .setDatatype(serializeDataType(IntegerType).get)
+            .setIntVal(seed)
+          val seedExpr = Some(ExprOuterClass.Expr.newBuilder().setLiteral(seedBuilder).build())
+          // the seed is put at the end of the arguments
+          scalarExprToProtoWithReturnType("murmur3_hash", IntegerType, exprs :+ seedExpr: _*)
+
+        case Sha2(left, numBits) if numBits.foldable =>
+          // it's possible for spark to dynamically compute the number of bits from input
+          // expression, however DataFusion does not support that yet.
+          val childExpr = exprToProtoInternal(left, inputs)
+          val bits = numBits.eval().asInstanceOf[Int]
+          val algorithm = bits match {
+            case 224 => "sha224"
+            case 256 | 0 => "sha256"
+            case 384 => "sha384"
+            case 512 => "sha512"
+            case _ =>
+              null
+          }
+          if (algorithm == null) {
+            emitWarning(s"numBits evaluated to a unknown value: $bits")
+            exprToProtoInternal(Literal(null, StringType), inputs)
+          } else {
+            scalarExprToProtoWithReturnType(algorithm, StringType, childExpr)
           }
 
         case e =>

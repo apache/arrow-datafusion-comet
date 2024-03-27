@@ -983,8 +983,7 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
     }
   }
 
-  // TODO: enable this when we add md5 function to Comet
-  ignore("md5") {
+  test("md5") {
     Seq(false, true).foreach { dictionary =>
       withSQLConf("parquet.enable.dictionary" -> dictionary.toString) {
         val table = "test"
@@ -1381,6 +1380,29 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       Seq("TR", "FA", "tr", "tru", "ye", "on", "fa", "fal", "fals", "of", "off"))
     // Invalid boolean casting values for Arrow and Spark
     testCastedColumn(inputValues = Seq("car", "Truck"))
+  }
+
+  test("hash functions") {
+    Seq(false).foreach { dictionary =>
+      withSQLConf("parquet.enable.dictionary" -> dictionary.toString) {
+        val table = "test"
+        withTable(table) {
+          sql(s"create table $table(col string, a int, b float) using parquet")
+          sql(s"""
+             |insert into $table values
+             |('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
+             |, ('Spark SQL  ', 10, 1.2), (NULL, NULL, NULL), ('', 0, 0.0), ('苹果手机', NULL, 3.999999)
+             |""".stripMargin)
+          checkSparkAnswerAndOperator("""
+               |select
+               |md5(col), md5(cast(a as string)), md5(cast(b as string)),
+               |hash(col), hash(col, 1), hash(col, 0), hash(col, a, b), hash(b, a, col),
+               |sha2(col, 0), sha2(col, 256), sha2(col, 224), sha2(col, 384), sha2(col, 512), sha2(col, 128)
+               |from test
+               |""".stripMargin)
+        }
+      }
+    }
   }
 
 }
