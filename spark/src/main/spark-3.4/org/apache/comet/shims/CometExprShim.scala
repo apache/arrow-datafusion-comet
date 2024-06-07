@@ -18,7 +18,9 @@
  */
 package org.apache.comet.shims
 
+import org.apache.comet.expressions.CometEvalMode
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.expressions.aggregate.{Average, Sum}
 
 /**
  * `CometExprShim` acts as a shim for for parsing expressions from different Spark versions.
@@ -29,5 +31,47 @@ trait CometExprShim {
      */
     def unhexSerde(unhex: Unhex): (Expression, Expression) = {
         (unhex.child, Literal(unhex.failOnError))
+    }
+
+    def evalMode(expr: Add): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Subtract): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Multiply): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Divide): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: IntegralDivide): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Remainder): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Pmod): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Sum): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(expr: Average): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(expr.evalMode)
+
+    def evalMode(c: Cast): CometEvalMode.Value =
+        CometEvalModeUtil.fromSparkEvalMode(c.evalMode)
+
+    def evalMode(r: Round): CometEvalMode.Value = CometEvalMode.fromBoolean(r.ansiEnabled)
+
+    def evalMode(r: BRound): CometEvalMode.Value = CometEvalMode.fromBoolean(r.ansiEnabled)
+}
+
+object CometEvalModeUtil {
+    def fromSparkEvalMode(evalMode: EvalMode.Value): CometEvalMode.Value = evalMode match {
+        case EvalMode.LEGACY => CometEvalMode.LEGACY
+        case EvalMode.TRY => CometEvalMode.TRY
+        case EvalMode.ANSI => CometEvalMode.ANSI
     }
 }

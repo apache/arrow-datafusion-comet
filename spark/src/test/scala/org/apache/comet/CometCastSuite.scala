@@ -31,7 +31,7 @@ import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{DataType, DataTypes, DecimalType}
 
-import org.apache.comet.expressions.{CometCast, Compatible}
+import org.apache.comet.expressions.{CometCast, CometEvalMode, Compatible}
 
 class CometCastSuite extends CometTestBase with AdaptiveSparkPlanHelper {
 
@@ -76,7 +76,7 @@ class CometCastSuite extends CometTestBase with AdaptiveSparkPlanHelper {
             } else {
               val testIgnored =
                 tags.get(expectedTestName).exists(s => s.contains("org.scalatest.Ignore"))
-              CometCast.isSupported(fromType, toType, None, "LEGACY") match {
+              CometCast.isSupported(fromType, toType, None, CometEvalMode.LEGACY) match {
                 case Compatible(_) =>
                   if (testIgnored) {
                     fail(
@@ -965,9 +965,7 @@ class CometCastSuite extends CometTestBase with AdaptiveSparkPlanHelper {
       }
 
       // with ANSI enabled, we should produce the same exception as Spark
-      withSQLConf(
-        (SQLConf.ANSI_ENABLED.key, "true"),
-        (CometConf.COMET_ANSI_MODE_ENABLED.key, "true")) {
+      withSQLConf((SQLConf.ANSI_ENABLED.key, "true")) {
 
         // cast() should throw exception on invalid inputs when ansi mode is enabled
         val df = data.withColumn("converted", col("a").cast(toType))
