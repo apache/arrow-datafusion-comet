@@ -71,6 +71,7 @@ use crate::{
                 covariance::Covariance,
                 if_expr::IfExpr,
                 negative,
+                regexp::RLike,
                 scalar_funcs::create_comet_physical_fun,
                 stats::StatsType,
                 stddev::Stddev,
@@ -434,6 +435,12 @@ impl PhysicalPlanner {
                 let right = self.create_expr(expr.right.as_ref().unwrap(), input_schema)?;
 
                 Ok(Arc::new(Like::new(left, right)))
+            }
+            ExprStruct::Rlike(expr) => {
+                let left = self.create_expr(expr.left.as_ref().unwrap(), input_schema.clone())?;
+                let right = self.create_expr(expr.right.as_ref().unwrap(), input_schema)?;
+
+                Ok(Arc::new(RLike::new(left, right)))
             }
             ExprStruct::CheckOverflow(expr) => {
                 let child = self.create_expr(expr.child.as_ref().unwrap(), input_schema)?;

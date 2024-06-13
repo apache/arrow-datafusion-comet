@@ -600,6 +600,29 @@ class CometExpressionSuite extends CometTestBase with AdaptiveSparkPlanHelper {
     }
   }
 
+  test("rlike") {
+    val table = "rlike_names"
+    withTable(table) {
+      sql(s"create table $table(id int, name varchar(20)) using parquet")
+      sql(s"insert into $table values(1,'James Smith')")
+      sql(s"insert into $table values(2,'Michael Rose')")
+      sql(s"insert into $table values(3,'Robert Williams')")
+      sql(s"insert into $table values(4,'Rames Rose')")
+      sql(s"insert into $table values(5,'Rames rose')")
+
+      withSQLConf(CometConf.COMET_REGEXP_ALLOW_INCOMPATIBLE.key -> "true") {
+        val query = sql(s"select id from $table where name rlike 'R[a-z]+s [Rr]ose'")
+        checkSparkAnswerAndOperator(query)
+
+        // test that we fall back to Spark if the pattern is not a scalar value
+        val query2 = sql(s"select id from $table where name rlike name")
+        val (sparkPlan, cometPlan) = checkSparkAnswer(query2)
+        val explain = new ExtendedExplainInfo().generateExtendedInfo(cometPlan)
+        assert(explain == "Only scalar patterns are supported")
+      }
+    }
+  }
+
   test("like with custom escape") {
     val table = "names"
     withTable(table) {
