@@ -37,6 +37,7 @@ import org.apache.spark.sql.execution.adaptive.{BroadcastQueryStageExec, Shuffle
 import org.apache.spark.sql.execution.aggregate.HashAggregateExec
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, HashJoin, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
@@ -197,6 +198,91 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde with CometExprShim
       case _: IntegerType | LongType | ShortType | ByteType => true
       case _ => false
     }
+  }
+
+  def windowExprToProto(
+      windowExpr: WindowExpression,
+      inputs: Seq[Attribute]): Option[OperatorOuterClass.WindowExpr] = {
+    val func = exprToProto(windowExpr.windowFunction, inputs).getOrElse(return None)
+
+    val f = windowExpr.windowSpec.frameSpecification
+
+    val (frameType, lowerBound, upperBound) = f match {
+      case SpecifiedWindowFrame(frameType, lBound, uBound) =>
+        val frameProto = frameType match {
+          case RowFrame => OperatorOuterClass.WindowFrameType.Rows
+          case RangeFrame => OperatorOuterClass.WindowFrameType.Range
+        }
+
+        val lBoundProto = lBound match {
+          case UnboundedPreceding =>
+            OperatorOuterClass.LowerWindowFrameBound
+              .newBuilder()
+              .setUnboundedPreceding(OperatorOuterClass.UnboundedPreceding.newBuilder().build())
+              .build()
+          case CurrentRow =>
+            OperatorOuterClass.LowerWindowFrameBound
+              .newBuilder()
+              .setCurrentRow(OperatorOuterClass.CurrentRow.newBuilder().build())
+              .build()
+          case e =>
+            OperatorOuterClass.LowerWindowFrameBound
+              .newBuilder()
+              .setPreceding(
+                OperatorOuterClass.Preceding
+                  .newBuilder()
+                  .setOffset(e.eval().asInstanceOf[Int])
+                  .build())
+              .build()
+        }
+
+        val uBoundProto = uBound match {
+          case UnboundedFollowing =>
+            OperatorOuterClass.UpperWindowFrameBound
+              .newBuilder()
+              .setUnboundedFollowing(OperatorOuterClass.UnboundedFollowing.newBuilder().build())
+              .build()
+          case CurrentRow =>
+            OperatorOuterClass.UpperWindowFrameBound
+              .newBuilder()
+              .setCurrentRow(OperatorOuterClass.CurrentRow.newBuilder().build())
+              .build()
+          case e =>
+            OperatorOuterClass.UpperWindowFrameBound
+              .newBuilder()
+              .setFollowing(
+                OperatorOuterClass.Following
+                  .newBuilder()
+                  .setOffset(e.eval().asInstanceOf[Int])
+                  .build())
+              .build()
+        }
+
+        (frameProto, lBoundProto, uBoundProto)
+      case _ =>
+        (
+          OperatorOuterClass.WindowFrameType.Rows,
+          OperatorOuterClass.LowerWindowFrameBound
+            .newBuilder()
+            .setUnboundedPreceding(OperatorOuterClass.UnboundedPreceding.newBuilder().build())
+            .build(),
+          OperatorOuterClass.UpperWindowFrameBound
+            .newBuilder()
+            .setUnboundedFollowing(OperatorOuterClass.UnboundedFollowing.newBuilder().build())
+            .build())
+    }
+
+    val frame = OperatorOuterClass.WindowFrame
+      .newBuilder()
+      .setFrameType(frameType)
+      .setLowerBound(lowerBound)
+      .setUpperBound(upperBound)
+      .build()
+
+    val spec =
+      OperatorOuterClass.WindowSpecDefinition.newBuilder().setFrameSpecification(frame).build()
+
+    Some(OperatorOuterClass.WindowExpr.newBuilder().setFunc(func).setSpec(spec).build())
   }
 
   def aggExprToProto(
@@ -2002,6 +2088,18 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde with CometExprShim
             None
           }
 
+        case r @ Rank(_) =>
+          val exprChildren = r.children.map(exprToProtoInternal(_, inputs))
+          scalarExprToProto("rank", exprChildren: _*)
+
+        case r @ RowNumber() =>
+          val exprChildren = r.children.map(exprToProtoInternal(_, inputs))
+          scalarExprToProto("row_number", exprChildren: _*)
+
+        case l @ Lag(_, _, _, _) =>
+          val exprChildren = l.children.map(exprToProtoInternal(_, inputs))
+          scalarExprToProto("lag", exprChildren: _*)
+
         // With Spark 3.4, CharVarcharCodegenUtils.readSidePadding gets called to pad spaces for
         // char types. Use rpad to achieve the behavior.
         // See https://github.com/apache/spark/pull/38151
@@ -2652,6 +2750,7 @@ object QueryPlanSerde extends Logging with ShimQueryPlanSerde with CometExprShim
       case _: TakeOrderedAndProjectExec => true
       case BroadcastQueryStageExec(_, _: CometBroadcastExchangeExec, _) => true
       case _: BroadcastExchangeExec => true
+      case _: WindowExec => true
       case _ => false
     }
   }

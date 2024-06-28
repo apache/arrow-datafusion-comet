@@ -40,6 +40,7 @@ import org.apache.spark.sql.execution.datasources.v2.BatchScanExec
 import org.apache.spark.sql.execution.datasources.v2.parquet.ParquetScan
 import org.apache.spark.sql.execution.exchange.{BroadcastExchangeExec, ReusedExchangeExec, ShuffleExchangeExec}
 import org.apache.spark.sql.execution.joins.{BroadcastHashJoinExec, ShuffledHashJoinExec, SortMergeJoinExec}
+import org.apache.spark.sql.execution.window.WindowExec
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
 
@@ -529,6 +530,16 @@ class CometSparkSessionExtensions
               CometSinkPlaceHolder(nativeOp, s, cometOp)
             case None =>
               s
+          }
+
+        case w: WindowExec =>
+          QueryPlanSerde.operator2Proto(w) match {
+            case Some(nativeOp) =>
+              val cometOp =
+                CometWindowExec(w, w.windowExpression, w.partitionSpec, w.orderSpec, w.child)
+              CometSinkPlaceHolder(nativeOp, w, cometOp)
+            case None =>
+              w
           }
 
         case s: TakeOrderedAndProjectExec =>

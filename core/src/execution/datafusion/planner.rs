@@ -24,7 +24,10 @@ use datafusion::{
     arrow::{compute::SortOptions, datatypes::SchemaRef},
     common::DataFusionError,
     execution::FunctionRegistry,
-    logical_expr::Operator as DataFusionOperator,
+    logical_expr::{
+        expr::find_df_window_func, Operator as DataFusionOperator, WindowFrame, WindowFrameBound,
+        WindowFrameUnits,
+    },
     physical_expr::{
         execution_props::ExecutionProps,
         expressions::{
@@ -42,7 +45,8 @@ use datafusion::{
         limit::LocalLimitExec,
         projection::ProjectionExec,
         sorts::sort::SortExec,
-        ExecutionPlan, Partitioning,
+        windows::BoundedWindowAggExec,
+        ExecutionPlan, InputOrderMode, Partitioning, WindowExpr,
     },
     prelude::SessionContext,
 };
@@ -87,12 +91,15 @@ use crate::{
         },
         operators::{CopyExec, ExecutionError, ScanExec},
         serde::to_arrow_datatype,
-        spark_expression,
         spark_expression::{
-            agg_expr::ExprStruct as AggExprStruct, expr::ExprStruct, literal::Value, AggExpr, Expr,
-            ScalarFunc,
+            self, agg_expr::ExprStruct as AggExprStruct, expr::ExprStruct, literal::Value, AggExpr,
+            Expr, ScalarFunc,
         },
-        spark_operator::{operator::OpStruct, BuildSide, JoinType, Operator},
+        spark_operator::{
+            lower_window_frame_bound::LowerFrameBoundStruct, operator::OpStruct,
+            upper_window_frame_bound::UpperFrameBoundStruct, BuildSide, JoinType, Operator,
+            WindowFrameType,
+        },
         spark_partitioning::{partitioning::PartitioningStruct, Partitioning as SparkPartitioning},
     },
 };
@@ -859,6 +866,50 @@ impl PhysicalPlanner {
                     )?),
                 ))
             }
+            OpStruct::Window(wnd) => {
+                dbg!(&children[0]);
+                let (scans, child) = self.create_plan(&children[0], inputs)?;
+                //dbg!(&child);
+                let input_schema = child.schema();
+                dbg!(&input_schema);
+                let sort_exprs: Result<Vec<PhysicalSortExpr>, ExecutionError> = wnd
+                    .order_by_list
+                    .iter()
+                    .map(|expr| self.create_sort_expr(expr, input_schema.clone()))
+                    .collect();
+
+                let partition_exprs: Result<Vec<Arc<dyn PhysicalExpr>>, ExecutionError> = wnd
+                    .partition_by_list
+                    .iter()
+                    .map(|expr| self.create_expr(expr, input_schema.clone()))
+                    .collect();
+
+                let sort_exprs = &sort_exprs?;
+                let partition_exprs = &partition_exprs?;
+
+                let window_expr: Result<Vec<Arc<dyn WindowExpr>>, ExecutionError> = wnd
+                    .window_expr
+                    .iter()
+                    .map(|expr| {
+                        self.create_window_expr(
+                            expr,
+                            input_schema.clone(),
+                            partition_exprs,
+                            sort_exprs,
+                        )
+                    })
+                    .collect();
+
+                Ok((
+                    scans,
+                    Arc::new(BoundedWindowAggExec::try_new(
+                        window_expr?,
+                        child,
+                        partition_exprs.to_vec(),
+                        InputOrderMode::Sorted,
+                    )?),
+                ))
+            }
             OpStruct::Expand(expand) => {
                 assert!(children.len() == 1);
                 let (scans, child) = self.create_plan(&children[0], inputs)?;
@@ -1320,6 +1371,106 @@ impl PhysicalPlanner {
                 )))
             }
         }
+    }
+
+    /// Create a DataFusion windows physical expression from Spark physical expression
+    fn create_window_expr<'a>(
+        &'a self,
+        spark_expr: &'a crate::execution::spark_operator::WindowExpr,
+        input_schema: SchemaRef,
+        partition_by: &[Arc<dyn PhysicalExpr>],
+        sort_exprs: &[PhysicalSortExpr],
+    ) -> Result<Arc<dyn WindowExpr>, ExecutionError> {
+        let (window_func_name, window_func_args) =
+            match &spark_expr.func.as_ref().unwrap().expr_struct.as_ref() {
+                Some(ExprStruct::ScalarFunc(f)) => (f.func.clone(), f.args.clone()),
+                other => {
+                    return Err(ExecutionError::GeneralError(format!(
+                        "{other:?} not supported for window function"
+                    )))
+                }
+            };
+
+        let window_func = match find_df_window_func(&window_func_name) {
+            Some(f) => f,
+            _ => {
+                return Err(ExecutionError::GeneralError(format!(
+                    "{window_func_name} not supported for window function"
+                )))
+            }
+        };
+
+        let window_args = window_func_args
+            .iter()
+            .map(|expr| self.create_expr(expr, input_schema.clone()))
+            .collect::<Result<Vec<_>, ExecutionError>>()?;
+
+        let spark_window_frame = match spark_expr
+            .spec
+            .as_ref()
+            .and_then(|inner| inner.frame_specification.as_ref())
+        {
+            Some(frame) => frame,
+            _ => {
+                return Err(ExecutionError::DeserializeError(
+                    "Cannot deserialize window frame".to_string(),
+                ))
+            }
+        };
+
+        let units = match spark_window_frame.frame_type() {
+            WindowFrameType::Rows => WindowFrameUnits::Rows,
+            WindowFrameType::Range => WindowFrameUnits::Range,
+        };
+
+        let lower_bound: WindowFrameBound = match spark_window_frame
+            .lower_bound
+            .as_ref()
+            .and_then(|inner| inner.lower_frame_bound_struct.as_ref())
+        {
+            Some(l) => match l {
+                LowerFrameBoundStruct::UnboundedPreceding(_) => {
+                    WindowFrameBound::Preceding(ScalarValue::Null)
+                }
+                LowerFrameBoundStruct::Preceding(offset) => {
+                    WindowFrameBound::Preceding(ScalarValue::Int32(Some(offset.offset)))
+                }
+                LowerFrameBoundStruct::CurrentRow(_) => WindowFrameBound::CurrentRow,
+            },
+            None => WindowFrameBound::Preceding(ScalarValue::Null),
+        };
+
+        let upper_bound: WindowFrameBound = match spark_window_frame
+            .upper_bound
+            .as_ref()
+            .and_then(|inner| inner.upper_frame_bound_struct.as_ref())
+        {
+            Some(u) => match u {
+                UpperFrameBoundStruct::UnboundedFollowing(_) => {
+                    WindowFrameBound::Preceding(ScalarValue::Null)
+                }
+                UpperFrameBoundStruct::Following(offset) => {
+                    WindowFrameBound::Preceding(ScalarValue::Int32(Some(offset.offset)))
+                }
+                UpperFrameBoundStruct::CurrentRow(_) => WindowFrameBound::CurrentRow,
+            },
+            None => WindowFrameBound::Following(ScalarValue::Null),
+        };
+
+        let window_frame = WindowFrame::new_bounds(units, lower_bound, upper_bound);
+
+        dbg!(&window_func);
+        datafusion::physical_plan::windows::create_window_expr(
+            &window_func,
+            window_func_name,
+            &window_args,
+            partition_by,
+            sort_exprs,
+            window_frame.into(),
+            &input_schema,
+            false, // TODO: Ignore nulls
+        )
+        .map_err(|e| ExecutionError::DataFusionError(e.to_string()))
     }
 
     /// Create a DataFusion physical partitioning from Spark physical partitioning
