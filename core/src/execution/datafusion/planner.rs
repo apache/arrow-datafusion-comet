@@ -38,7 +38,7 @@ use datafusion::{
     physical_plan::{
         aggregates::{AggregateMode as DFAggregateMode, PhysicalGroupBy},
         filter::FilterExec,
-        joins::{utils::JoinFilter, HashJoinExec, PartitionMode, SortMergeJoinExec},
+        joins::{utils::JoinFilter, HashJoinExec, NestedLoopJoinExec, PartitionMode, SortMergeJoinExec},
         limit::LocalLimitExec,
         projection::ProjectionExec,
         sorts::sort::SortExec,
@@ -979,6 +979,26 @@ impl PhysicalPlanner {
                 };
 
                 Ok((scans, hash_join))
+            }
+
+            OpStruct::BroadcastNestedLoopJoin(join) => {
+               // create physical op of arrow data fusion.
+                let empty_keys: &[Expr] = &[];
+                let (join_params, scans) = self.parse_join_parameters(
+                                inputs,
+                                children,
+                                &empty_keys, // as bnlj doesn't have join keys
+                                &empty_keys, // as bnlj doesn't have join keys
+                                join.join_type,
+                                &join.condition,
+                            )?;
+                let join = Arc::new(NestedLoopJoinExec::try_new(
+                                join_params.left,
+                                join_params.right,
+                                join_params.join_filter,
+                                &join_params.join_type
+                            )?);
+                Ok((scans, join))
             }
         }
     }
